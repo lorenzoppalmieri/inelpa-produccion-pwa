@@ -36,7 +36,7 @@ export default function PuestoSelectorModal({
   onCancel,
   onConfirm,
 }: Props) {
-  const puestos = useLiveQuery<PuestoTrabajo[]>(
+  const puestos = useLiveQuery(
     async () => {
       const rows = await db.puestos
         .where('sector_codigo')
@@ -45,7 +45,7 @@ export default function PuestoSelectorModal({
       return rows.filter((p) => p.activo).sort((a, b) => a.nombre.localeCompare(b.nombre))
     },
     [sectorCodigo],
-    [],
+    [] as PuestoTrabajo[],
   )
 
   const [seleccionadoId, setSeleccionadoId] = useState<string | null>(puestoHabitualId)

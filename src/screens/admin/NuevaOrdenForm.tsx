@@ -42,10 +42,10 @@ interface Props {
 }
 
 export default function NuevaOrdenForm({ onCreada }: Props) {
-  const sectoresDisponibles = useLiveQuery<Sector[]>(
+  const sectoresDisponibles = useLiveQuery(
     () => db.sectores.toArray(),
     [],
-    [],
+    [] as Sector[],
   )
 
   const [codigo, setCodigo] = useState('')

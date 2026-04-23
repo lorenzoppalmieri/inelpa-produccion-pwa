@@ -32,7 +32,7 @@ interface Props {
 }
 
 export default function CausaDemoraModal({ sectorCodigo, onCancel, onConfirm }: Props) {
-  const causas = useLiveQuery<CausaDemora[]>(
+  const causas = useLiveQuery(
     async () => {
       const todas = await db.causasDemora.toArray()
       return todas
@@ -40,7 +40,7 @@ export default function CausaDemoraModal({ sectorCodigo, onCancel, onConfirm }: 
         .sort((a, b) => a.codigo.localeCompare(b.codigo))
     },
     [sectorCodigo],
-    [],
+    [] as CausaDemora[],
   )
 
   const [filtro, setFiltro] = useState('')

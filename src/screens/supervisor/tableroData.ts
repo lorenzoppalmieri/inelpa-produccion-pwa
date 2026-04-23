@@ -5,7 +5,6 @@ import type {
   OrdenFabricacion,
   PuestoTrabajo,
   Operario,
-  CausaDemora,
   SectorCodigo,
   TipoEvento,
 } from '../../types'
