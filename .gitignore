@@ -35,3 +35,6 @@ dist-ssr
 
 # Service worker generado
 dev-dist
+
+# TypeScript build info
+*.tsbuildinfo
