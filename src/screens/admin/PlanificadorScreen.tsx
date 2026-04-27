@@ -160,12 +160,22 @@ export default function PlanificadorScreen() {
 
   const actualizarItem = async (itemId: string, parche: Partial<ItemOrden>) => {
     setError(null)
-    const { error: errU } = await supabase
+    // Pedimos `.select()` para que Supabase nos devuelva la fila actualizada;
+    // si una policy RLS bloquea silenciosamente, data viene [] sin error y
+    // ahí lo detectamos en vez de mostrar éxito falso.
+    const { data, error: errU } = await supabase
       .from('items_orden')
       .update(parche)
       .eq('id', itemId)
+      .select()
     if (errU) {
       setError(`No se pudo guardar: ${errU.message}`)
+      return false
+    }
+    if (!data || data.length === 0) {
+      setError(
+        'No se guardó el cambio (sin error pero 0 filas afectadas). Revisá permisos RLS / GRANT en Supabase.',
+      )
       return false
     }
     await syncCatalogos()
@@ -270,8 +280,10 @@ export default function PlanificadorScreen() {
         </div>
       )}
 
-      {/* Acciones masivas */}
-      {seleccionados.size > 0 && (
+      {/* Acciones masivas — sólo cuando hay 2+ items seleccionados.
+          Para 1 item alcanza con la edición inline en la fila, el panel
+          masivo sólo confunde duplicando los inputs. */}
+      {seleccionados.size >= 2 && (
         <AccionesMasivas
           seleccionados={Array.from(seleccionados)}
           puestos={puestos}
@@ -282,6 +294,22 @@ export default function PlanificadorScreen() {
           }}
           onError={(msg) => setError(msg)}
         />
+      )}
+
+      {/* Tip cuando hay 1 item seleccionado: explicarle que el panel masivo
+          sólo aparece a partir de 2 (para que el usuario no espere el panel
+          arriba si seleccionó uno solo). */}
+      {seleccionados.size === 1 && (
+        <div className="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-2 text-xs text-slate-400">
+          1 item seleccionado — editá los campos directamente en la fila.
+          El panel de asignación masiva aparece al seleccionar 2 o más.
+          <button
+            onClick={() => setSeleccionados(new Set())}
+            className="ml-3 text-amber-400 hover:text-amber-300 underline"
+          >
+            Deseleccionar
+          </button>
+        </div>
       )}
 
       {/* Listado por orden */}
