@@ -8,6 +8,7 @@ import {
 import NuevaOrdenForm from './admin/NuevaOrdenForm'
 import OrdenesListado from './admin/OrdenesListado'
 import PlanificadorScreen from './admin/PlanificadorScreen'
+import CapacidadScreen from './admin/CapacidadScreen'
 
 /**
  * Panel de administración (MVP).
@@ -22,7 +23,7 @@ import PlanificadorScreen from './admin/PlanificadorScreen'
  *  - Nueva orden
  */
 
-type Tab = 'listado' | 'nueva' | 'planificador'
+type Tab = 'listado' | 'nueva' | 'planificador' | 'capacidad'
 
 export default function AdminScreen() {
   const [desbloqueado, setDesbloqueado] = useState(esAdminDesbloqueado())
@@ -142,6 +143,9 @@ function AdminPanel({ onLock }: { onLock: () => void }) {
         <TabBtn active={tab === 'planificador'} onClick={() => setTab('planificador')}>
           Planificador
         </TabBtn>
+        <TabBtn active={tab === 'capacidad'} onClick={() => setTab('capacidad')}>
+          Capacidad
+        </TabBtn>
         <TabBtn active={tab === 'nueva'} onClick={() => setTab('nueva')}>
           + Nueva orden
         </TabBtn>
@@ -150,6 +154,7 @@ function AdminPanel({ onLock }: { onLock: () => void }) {
       <div className="flex-1 overflow-y-auto">
         {tab === 'listado' && <OrdenesListado />}
         {tab === 'planificador' && <PlanificadorScreen />}
+        {tab === 'capacidad' && <CapacidadScreen />}
         {tab === 'nueva' && <NuevaOrdenForm onCreada={() => setTab('planificador')} />}
       </div>
     </div>
