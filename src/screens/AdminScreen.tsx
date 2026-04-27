@@ -7,6 +7,7 @@ import {
 } from '../lib/adminAuth'
 import NuevaOrdenForm from './admin/NuevaOrdenForm'
 import OrdenesListado from './admin/OrdenesListado'
+import PlanificadorScreen from './admin/PlanificadorScreen'
 
 /**
  * Panel de administración (MVP).
@@ -21,7 +22,7 @@ import OrdenesListado from './admin/OrdenesListado'
  *  - Nueva orden
  */
 
-type Tab = 'listado' | 'nueva'
+type Tab = 'listado' | 'nueva' | 'planificador'
 
 export default function AdminScreen() {
   const [desbloqueado, setDesbloqueado] = useState(esAdminDesbloqueado())
@@ -138,6 +139,9 @@ function AdminPanel({ onLock }: { onLock: () => void }) {
         <TabBtn active={tab === 'listado'} onClick={() => setTab('listado')}>
           Órdenes activas
         </TabBtn>
+        <TabBtn active={tab === 'planificador'} onClick={() => setTab('planificador')}>
+          Planificador
+        </TabBtn>
         <TabBtn active={tab === 'nueva'} onClick={() => setTab('nueva')}>
           + Nueva orden
         </TabBtn>
@@ -145,7 +149,8 @@ function AdminPanel({ onLock }: { onLock: () => void }) {
 
       <div className="flex-1 overflow-y-auto">
         {tab === 'listado' && <OrdenesListado />}
-        {tab === 'nueva' && <NuevaOrdenForm onCreada={() => setTab('listado')} />}
+        {tab === 'planificador' && <PlanificadorScreen />}
+        {tab === 'nueva' && <NuevaOrdenForm onCreada={() => setTab('planificador')} />}
       </div>
     </div>
   )

@@ -25,7 +25,7 @@ export default function LoginScreen() {
     const num = parseInt(pinStr, 10)
     const op = Number.isFinite(num) ? await loginConPin(num) : null
     if (op) {
-      navigate('/etapas', { replace: true })
+      navigate('/cola', { replace: true })
     } else {
       setError('PIN inválido. Verificá con tu supervisor.')
       setPin('')

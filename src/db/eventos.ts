@@ -4,16 +4,15 @@ import { syncPendingEventos } from './sync'
 
 /**
  * Crea un evento localmente en Dexie con sync_status='pending' y dispara
- * el sync (best-effort). Si no hay red, el evento queda en la cola y se
- * sube cuando vuelva la conexión.
+ * el sync (best-effort). Si no hay red, queda en cola.
  *
  * El ID se genera en el cliente (UUID v4) para permitir referencias
- * cruzadas offline — p.ej. un DEMORA_FIN puede apuntar al ID del
- * DEMORA_INICIO aunque ninguno de los dos haya llegado a Supabase todavía.
+ * cruzadas offline — un DEMORA_FIN puede apuntar al ID del DEMORA_INICIO
+ * aunque ninguno haya llegado todavía a Supabase.
  */
 
 type CrearEventoInput = {
-  etapa_orden_id: string
+  item_orden_id: string
   operario_id: string
   puesto_trabajo_id?: string | null
   tipo: TipoEvento
@@ -23,12 +22,9 @@ type CrearEventoInput = {
 }
 
 function uuidv4(): string {
-  // crypto.randomUUID está disponible en todos los navegadores modernos
-  // (Chrome 92+, Firefox 95+, Safari 15.4+). El PC panel los cumple.
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID()
   }
-  // Fallback por si acaso
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0
     const v = c === 'x' ? r : (r & 0x3) | 0x8
@@ -40,7 +36,7 @@ export async function crearEvento(input: CrearEventoInput): Promise<Evento> {
   const ahora = new Date().toISOString()
   const evento: Evento = {
     id: uuidv4(),
-    etapa_orden_id: input.etapa_orden_id,
+    item_orden_id: input.item_orden_id,
     operario_id: input.operario_id,
     puesto_trabajo_id: input.puesto_trabajo_id ?? null,
     tipo: input.tipo,
@@ -54,25 +50,21 @@ export async function crearEvento(input: CrearEventoInput): Promise<Evento> {
   }
 
   await db.eventos.put(evento)
-
-  // Fire-and-forget: si hay red, intenta subirlo ya mismo.
   void syncPendingEventos()
-
   return evento
 }
 
 /**
- * Busca la demora abierta más reciente para una etapa/operario:
- * un DEMORA_INICIO que no tenga un DEMORA_FIN que lo referencie.
- * Se usa para saber si el botón "Registrar demora" debe crear inicio o fin.
+ * Busca la demora abierta más reciente para un item/operario:
+ * un DEMORA_INICIO sin DEMORA_FIN que lo referencie.
  */
 export async function buscarDemoraAbierta(
-  etapaOrdenId: string,
+  itemOrdenId: string,
   operarioId: string,
 ): Promise<Evento | null> {
   const eventos = await db.eventos
-    .where('etapa_orden_id')
-    .equals(etapaOrdenId)
+    .where('item_orden_id')
+    .equals(itemOrdenId)
     .and((e) => e.operario_id === operarioId)
     .toArray()
 
@@ -89,8 +81,11 @@ export async function buscarDemoraAbierta(
   return null
 }
 
-/** Lee todos los eventos de una etapa ordenados por timestamp. */
-export async function eventosDeEtapa(etapaOrdenId: string): Promise<Evento[]> {
-  const rows = await db.eventos.where('etapa_orden_id').equals(etapaOrdenId).toArray()
+/** Lee todos los eventos de un item ordenados por timestamp. */
+export async function eventosDeItem(itemOrdenId: string): Promise<Evento[]> {
+  const rows = await db.eventos
+    .where('item_orden_id')
+    .equals(itemOrdenId)
+    .toArray()
   return rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))
 }

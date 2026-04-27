@@ -3,14 +3,22 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../db/dexie'
 import { useSession } from '../context/SessionContext'
-import { crearEvento, buscarDemoraAbierta, eventosDeEtapa } from '../db/eventos'
-import type { CausaDemora, EtapaOrden, OrdenFabricacion, Evento, PuestoTrabajo } from '../types'
+import { crearEvento, buscarDemoraAbierta, eventosDeItem } from '../db/eventos'
+import type {
+  CausaDemora,
+  ItemOrden,
+  OrdenFabricacion,
+  Evento,
+  PuestoTrabajo,
+  Semielaborado,
+  ProductoTerminado,
+} from '../types'
 import CausaDemoraModal from '../components/CausaDemoraModal'
 import ObservacionModal from '../components/ObservacionModal'
 import PuestoSelectorModal from '../components/PuestoSelectorModal'
 
 /**
- * Pantalla principal: operar sobre una etapa de trabajo.
+ * Pantalla principal del operario: opera sobre un item asignado.
  *
  * 4 acciones (botones grandes):
  *  - Iniciar proceso
@@ -18,30 +26,43 @@ import PuestoSelectorModal from '../components/PuestoSelectorModal'
  *  - Control de calidad (pide observación)
  *  - Finalizar proceso
  *
- * Muestra un timeline con los últimos eventos de esta etapa.
+ * Muestra un timeline con los últimos eventos de este item.
  */
 export default function OperacionScreen() {
-  const { etapaId } = useParams<{ etapaId: string }>()
+  const { itemId } = useParams<{ itemId: string }>()
   const navigate = useNavigate()
   const { operario } = useSession()
 
-  const etapa = useLiveQuery(
-    () => (etapaId ? db.etapas.get(etapaId) : undefined),
-    [etapaId],
+  const item = useLiveQuery(
+    () => (itemId ? db.items.get(itemId) : undefined),
+    [itemId],
   )
   const orden = useLiveQuery(
-    () => (etapa ? db.ordenes.get(etapa.orden_id) : undefined),
-    [etapa?.orden_id],
+    () => (item ? db.ordenes.get(item.orden_id) : undefined),
+    [item?.orden_id],
+  )
+  const semielaborado = useLiveQuery(
+    () =>
+      item?.semielaborado_codigo
+        ? db.semielaborados.get(item.semielaborado_codigo)
+        : undefined,
+    [item?.semielaborado_codigo],
+  )
+  const productoTerminado = useLiveQuery(
+    () =>
+      item?.producto_terminado_codigo
+        ? db.productosTerminados.get(item.producto_terminado_codigo)
+        : undefined,
+    [item?.producto_terminado_codigo],
   )
   const eventos = useLiveQuery(
-    async () => (etapaId ? eventosDeEtapa(etapaId) : []),
-    [etapaId],
+    async () => (itemId ? eventosDeItem(itemId) : []),
+    [itemId],
   )
-
   const demoraAbierta = useLiveQuery(
     async () =>
-      etapaId && operario ? buscarDemoraAbierta(etapaId, operario.id) : null,
-    [etapaId, operario?.id],
+      itemId && operario ? buscarDemoraAbierta(itemId, operario.id) : null,
+    [itemId, operario?.id],
   )
 
   const [modalCausa, setModalCausa] = useState(false)
@@ -50,40 +71,37 @@ export default function OperacionScreen() {
   const [trabajando, setTrabajando] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
 
-  if (!operario || !etapaId) {
-    navigate('/etapas', { replace: true })
+  if (!operario || !itemId) {
+    navigate('/cola', { replace: true })
     return null
   }
-  if (etapa === undefined || eventos === undefined) {
+  if (item === undefined || eventos === undefined) {
     return <div className="p-8 text-slate-400">Cargando…</div>
   }
-  if (etapa === null || !etapa) {
+  if (item === null || !item) {
     return (
       <div className="p-8 text-slate-400">
-        La etapa no existe o no está disponible.
-        <button className="btn-secondary mt-4" onClick={() => navigate('/etapas')}>
+        El item no existe o no está disponible.
+        <button className="btn-secondary mt-4" onClick={() => navigate('/cola')}>
           Volver
         </button>
       </div>
     )
   }
 
-  // Reglas de qué botones se pueden usar según estado de la etapa
-  const iniciado = etapa.estado === 'en_proceso' || etapa.estado === 'demorada'
-  const puedeIniciar = etapa.estado === 'pendiente'
-  const puedeFinalizar = etapa.estado === 'en_proceso' // no se finaliza si hay demora abierta
+  const iniciado = item.estado === 'en_proceso' || item.estado === 'demorada'
+  const puedeIniciar = item.estado === 'pendiente'
+  const puedeFinalizar = item.estado === 'en_proceso'
 
   const mostrarFlash = (msg: string) => {
     setFlash(msg)
     setTimeout(() => setFlash(null), 2500)
   }
 
-  // Puesto que aplica a los eventos post-inicio. Prioridad:
-  //  1. Puesto con el que se inició la etapa (etapa.puesto_trabajo_id)
-  //  2. Puesto habitual del operario
-  // Si el operario trabajó en una máquina distinta a la habitual y apretó
-  // "Registrar demora", el evento debe reflejar la máquina real donde ocurrió.
-  const puestoVigenteId = etapa.puesto_trabajo_id ?? operario.puesto_trabajo_id ?? null
+  // Puesto vigente para los eventos:
+  //  1. el puesto que el item ya tiene asignado (por planificador o por inicio previo)
+  //  2. puesto habitual del operario (fallback)
+  const puestoVigenteId = item.puesto_trabajo_id ?? operario.puesto_trabajo_id ?? null
 
   const onIniciar = () => {
     if (trabajando) return
@@ -95,21 +113,22 @@ export default function OperacionScreen() {
     setTrabajando(true)
     try {
       await crearEvento({
-        etapa_orden_id: etapa.id,
+        item_orden_id: item.id,
         operario_id: operario.id,
         puesto_trabajo_id: puesto.id,
         tipo: 'INICIO',
       })
-      await db.etapas.update(etapa.id, {
+      // Si el item no tenía operario asignado, lo "tomamos" aquí.
+      const update: Partial<ItemOrden> = {
         estado: 'en_proceso',
         inicio_real_at: new Date().toISOString(),
         puesto_trabajo_id: puesto.id,
-      })
+      }
+      if (!item.operario_id) update.operario_id = operario.id
+      await db.items.update(item.id, update)
       const esDistinto = puesto.id !== operario.puesto_trabajo_id
       mostrarFlash(
-        esDistinto
-          ? `Proceso iniciado en ${puesto.nombre}.`
-          : 'Proceso iniciado.',
+        esDistinto ? `Proceso iniciado en ${puesto.nombre}.` : 'Proceso iniciado.',
       )
     } finally {
       setTrabajando(false)
@@ -121,17 +140,17 @@ export default function OperacionScreen() {
     setTrabajando(true)
     try {
       await crearEvento({
-        etapa_orden_id: etapa.id,
+        item_orden_id: item.id,
         operario_id: operario.id,
         puesto_trabajo_id: puestoVigenteId,
         tipo: 'FIN',
       })
-      await db.etapas.update(etapa.id, {
+      await db.items.update(item.id, {
         estado: 'completada',
         fin_real_at: new Date().toISOString(),
       })
       mostrarFlash('Proceso finalizado.')
-      setTimeout(() => navigate('/etapas', { replace: true }), 800)
+      setTimeout(() => navigate('/cola', { replace: true }), 800)
     } finally {
       setTrabajando(false)
     }
@@ -140,40 +159,41 @@ export default function OperacionScreen() {
   const onDemora = async () => {
     if (trabajando) return
     if (demoraAbierta) {
-      // Cerrar la demora
       setTrabajando(true)
       try {
         await crearEvento({
-          etapa_orden_id: etapa.id,
+          item_orden_id: item.id,
           operario_id: operario.id,
           puesto_trabajo_id: puestoVigenteId,
           tipo: 'DEMORA_FIN',
           evento_demora_inicio_id: demoraAbierta.id,
         })
-        await db.etapas.update(etapa.id, { estado: 'en_proceso' })
+        await db.items.update(item.id, { estado: 'en_proceso' })
         mostrarFlash('Demora finalizada.')
       } finally {
         setTrabajando(false)
       }
     } else {
-      // Abrir demora — pide causa
       setModalCausa(true)
     }
   }
 
-  const onCausaSeleccionada = async (causa: CausaDemora, observacion: string | undefined) => {
+  const onCausaSeleccionada = async (
+    causa: CausaDemora,
+    observacion: string | undefined,
+  ) => {
     setModalCausa(false)
     setTrabajando(true)
     try {
       await crearEvento({
-        etapa_orden_id: etapa.id,
+        item_orden_id: item.id,
         operario_id: operario.id,
         puesto_trabajo_id: puestoVigenteId,
         tipo: 'DEMORA_INICIO',
         causa_demora_codigo: causa.codigo,
         observacion,
       })
-      await db.etapas.update(etapa.id, { estado: 'demorada' })
+      await db.items.update(item.id, { estado: 'demorada' })
       mostrarFlash(`Demora iniciada (${causa.codigo}).`)
     } finally {
       setTrabajando(false)
@@ -185,7 +205,7 @@ export default function OperacionScreen() {
     setTrabajando(true)
     try {
       await crearEvento({
-        etapa_orden_id: etapa.id,
+        item_orden_id: item.id,
         operario_id: operario.id,
         puesto_trabajo_id: puestoVigenteId,
         tipo: 'CONTROL_CALIDAD',
@@ -199,11 +219,13 @@ export default function OperacionScreen() {
 
   return (
     <div className="h-full p-6 flex flex-col gap-4">
-      <HeaderEtapa
-        etapa={etapa}
+      <HeaderItem
+        item={item}
         orden={orden ?? null}
+        semielaborado={semielaborado ?? null}
+        productoTerminado={productoTerminado ?? null}
         puestoVigenteId={puestoVigenteId}
-        onVolver={() => navigate('/etapas')}
+        onVolver={() => navigate('/cola')}
       />
 
       {flash && (
@@ -226,7 +248,6 @@ export default function OperacionScreen() {
         </div>
       )}
 
-      {/* Botones de acción */}
       <div className="grid grid-cols-2 gap-4 mt-2">
         <button
           className="btn-primary"
@@ -258,7 +279,6 @@ export default function OperacionScreen() {
         </button>
       </div>
 
-      {/* Timeline de eventos */}
       <div className="flex-1 overflow-y-auto mt-4">
         <h2 className="text-touch-base font-semibold text-slate-300 mb-2">
           Últimos eventos
@@ -301,14 +321,18 @@ export default function OperacionScreen() {
   )
 }
 
-function HeaderEtapa({
-  etapa,
+function HeaderItem({
+  item,
   orden,
+  semielaborado,
+  productoTerminado,
   puestoVigenteId,
   onVolver,
 }: {
-  etapa: EtapaOrden
+  item: ItemOrden
   orden: OrdenFabricacion | null
+  semielaborado: Semielaborado | null
+  productoTerminado: ProductoTerminado | null
   puestoVigenteId: string | null
   onVolver: () => void
 }) {
@@ -316,23 +340,59 @@ function HeaderEtapa({
     () => (puestoVigenteId ? db.puestos.get(puestoVigenteId) : undefined),
     [puestoVigenteId],
   )
+  const piezaCodigo =
+    item.tipo === 'semielaborado'
+      ? semielaborado?.codigo ?? item.semielaborado_codigo
+      : productoTerminado?.codigo ?? item.producto_terminado_codigo
+  const piezaDesc =
+    item.tipo === 'semielaborado'
+      ? semielaborado?.descripcion
+      : productoTerminado?.descripcion
+
   return (
     <header className="flex items-start justify-between gap-4 pb-3 border-b border-slate-700">
-      <div>
-        <div className="text-touch-xl font-bold text-inelpa-accent">
-          {orden?.codigo ?? '(sin código)'}
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="text-touch-xl font-bold text-inelpa-accent">
+            {piezaCodigo ?? '(pieza)'}
+          </div>
+          {item.fase && (
+            <span className="text-sm font-bold px-2 py-0.5 rounded bg-violet-700 text-white">
+              {item.fase}
+            </span>
+          )}
+          {item.tipo === 'ensamble_final' && (
+            <span className="text-sm font-bold px-2 py-0.5 rounded bg-orange-700 text-white">
+              ENSAMBLE FINAL
+            </span>
+          )}
         </div>
-        {orden?.cliente && <div className="text-touch-base text-slate-300">{orden.cliente}</div>}
-        {orden?.descripcion && (
-          <div className="text-sm text-slate-400 mt-1 max-w-3xl">{orden.descripcion}</div>
+        {piezaDesc && (
+          <div className="text-touch-base text-slate-300 mt-1">{piezaDesc}</div>
         )}
-        <div className="text-xs text-slate-500 mt-2">
-          Sector {etapa.sector_codigo} · Secuencia {etapa.secuencia} · Estado {etapa.estado}
+        <div className="text-xs text-slate-500 mt-2 flex flex-wrap gap-x-3 gap-y-1">
+          <span>
+            Orden{' '}
+            <span className="text-slate-300 font-semibold">
+              {orden?.codigo ?? '—'}
+            </span>
+          </span>
+          {orden?.cliente && <span>Cliente {orden.cliente}</span>}
+          <span>
+            Unidad {item.unidad_index}/{orden?.cantidad_unidades ?? '?'}
+          </span>
+          <span>Sector {item.sector_codigo}</span>
+          <span>Estado {item.estado}</span>
           {puesto && (
-            <>
-              {' '}· Puesto{' '}
+            <span>
+              Puesto{' '}
               <span className="text-slate-300 font-semibold">{puesto.nombre}</span>
-            </>
+            </span>
+          )}
+          {item.codigo_interno_fabricacion && (
+            <span className="font-mono text-slate-400">
+              {item.codigo_interno_fabricacion}
+            </span>
           )}
         </div>
       </div>

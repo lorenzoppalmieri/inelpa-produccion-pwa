@@ -6,22 +6,21 @@ import type {
   Operario,
   CausaDemora,
   OrdenFabricacion,
-  EtapaOrden,
+  ProductoTerminado,
+  Semielaborado,
+  BomItem,
+  ItemOrden,
 } from '../types'
 
 /**
- * Descarga los catálogos desde Supabase y los vuelca en Dexie.
+ * Descarga catálogos y datos operativos desde Supabase a Dexie.
  *
- * Criterio de diseño:
- *  - Todo se hace en una sola pasada al arrancar la app si hay red.
- *  - Si no hay red, se usa lo que haya cacheado de la última sesión.
- *  - Los catálogos son chicos (≤ 100 filas cada uno en el horizonte previsto),
- *    así que bajamos la tabla entera y hacemos `bulkPut` — evita lógica de diff.
- *  - Órdenes/etapas: sólo traemos las que están activas (estado 'pendiente' o
- *    'en_proceso'). Las completadas no hacen falta en la PWA.
+ * - Catálogos (sectores, puestos, operarios, causas, productos, semielaborados, bom):
+ *   se reemplazan completos.
+ * - Órdenes activas e items de esas órdenes: se hace `bulkPut` para no pisar
+ *   cambios locales pendientes de sincronizar.
  *
- * Devuelve el timestamp del último sync exitoso; si hay error, devuelve null
- * (la UI sigue funcionando con lo cacheado).
+ * Devuelve timestamp ISO del último sync exitoso, o null si falló o no había red.
  */
 export async function syncCatalogos(): Promise<string | null> {
   if (!navigator.onLine) {
@@ -29,24 +28,44 @@ export async function syncCatalogos(): Promise<string | null> {
   }
 
   try {
-    // Bajamos todo en paralelo — son queries independientes.
-    const [sectoresRes, puestosRes, operariosRes, causasRes, ordenesRes, etapasRes] =
-      await Promise.all([
-        supabase.from('sectores').select('*').eq('activo', true),
-        supabase.from('puestos_trabajo').select('*').eq('activo', true),
-        supabase.from('operarios').select('*').eq('activo', true),
-        supabase.from('causas_demora').select('*').eq('activa', true),
-        supabase.from('ordenes_fabricacion').select('*').in('estado', ['pendiente', 'en_proceso']),
-        supabase.from('etapas_orden').select('*').in('estado', ['pendiente', 'en_proceso', 'demorada']),
-      ])
+    const [
+      sectoresRes,
+      puestosRes,
+      operariosRes,
+      causasRes,
+      productosRes,
+      semielaboradosRes,
+      bomRes,
+      ordenesRes,
+      itemsRes,
+    ] = await Promise.all([
+      supabase.from('sectores').select('*').eq('activo', true),
+      supabase.from('puestos_trabajo').select('*').eq('activo', true),
+      supabase.from('operarios').select('*').eq('activo', true),
+      supabase.from('causas_demora').select('*').eq('activa', true),
+      supabase.from('productos_terminados').select('*').eq('activo', true),
+      supabase.from('semielaborados').select('*').eq('activo', true),
+      supabase.from('bom_productos').select('*'),
+      supabase
+        .from('ordenes_fabricacion')
+        .select('*')
+        .in('estado', ['pendiente', 'en_proceso']),
+      supabase
+        .from('items_orden')
+        .select('*')
+        .in('estado', ['pendiente', 'en_proceso', 'demorada']),
+    ])
 
     const errors = [
       sectoresRes.error,
       puestosRes.error,
       operariosRes.error,
       causasRes.error,
+      productosRes.error,
+      semielaboradosRes.error,
+      bomRes.error,
       ordenesRes.error,
-      etapasRes.error,
+      itemsRes.error,
     ].filter(Boolean)
 
     if (errors.length > 0) {
@@ -56,7 +75,17 @@ export async function syncCatalogos(): Promise<string | null> {
 
     await db.transaction(
       'rw',
-      [db.sectores, db.puestos, db.operarios, db.causasDemora, db.ordenes, db.etapas],
+      [
+        db.sectores,
+        db.puestos,
+        db.operarios,
+        db.causasDemora,
+        db.productosTerminados,
+        db.semielaborados,
+        db.bom,
+        db.ordenes,
+        db.items,
+      ],
       async () => {
         await db.sectores.clear()
         await db.sectores.bulkPut((sectoresRes.data ?? []) as Sector[])
@@ -70,12 +99,22 @@ export async function syncCatalogos(): Promise<string | null> {
         await db.causasDemora.clear()
         await db.causasDemora.bulkPut((causasRes.data ?? []) as CausaDemora[])
 
-        // Para órdenes/etapas NO hacemos clear total: la etapa/orden puede
-        // haber sido modificada localmente y aún no haber sincronizado.
-        // Por ahora (MVP sin escritura de etapas desde la PWA) hacemos bulkPut
-        // que actualiza por PK sin tocar filas ajenas.
+        await db.productosTerminados.clear()
+        await db.productosTerminados.bulkPut(
+          (productosRes.data ?? []) as ProductoTerminado[],
+        )
+
+        await db.semielaborados.clear()
+        await db.semielaborados.bulkPut(
+          (semielaboradosRes.data ?? []) as Semielaborado[],
+        )
+
+        await db.bom.clear()
+        await db.bom.bulkPut((bomRes.data ?? []) as BomItem[])
+
+        // Órdenes/items: bulkPut conserva cambios locales por PK.
         await db.ordenes.bulkPut((ordenesRes.data ?? []) as OrdenFabricacion[])
-        await db.etapas.bulkPut((etapasRes.data ?? []) as EtapaOrden[])
+        await db.items.bulkPut((itemsRes.data ?? []) as ItemOrden[])
       },
     )
 
@@ -88,7 +127,7 @@ export async function syncCatalogos(): Promise<string | null> {
   }
 }
 
-/** Lee el timestamp del último sync exitoso de catálogos. */
+/** Lee el timestamp del último sync exitoso. */
 export async function getLastCatalogosSync(): Promise<string | null> {
   const row = await db.kv.get('catalogos_last_sync')
   return (row?.value as string | undefined) ?? null

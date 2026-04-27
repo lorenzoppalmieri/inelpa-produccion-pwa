@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SectorCodigo } from '../../types'
-import { cargarTablero, formatoMinutos, type EtapaEnTablero } from './tableroData'
+import { cargarTablero, formatoMinutos, type ItemEnTablero } from './tableroData'
 
 /**
  * Tablero de supervisor — vista tipo "war room".
  *
- * - Grid con una tarjeta por etapa activa.
- * - Auto-refresh cada 15s (polling, ver nota al pie).
+ * - Grid con una tarjeta por item activo (bobina, cuba, ensamble, etc).
+ * - Auto-refresh cada 15s (polling).
  * - Filtro por sector (o ver todo).
  * - Semáforo por estado: gris pendiente, verde en proceso, rojo demorada.
  * - KPIs resumen arriba.
  *
- * Nota sobre polling vs Supabase Realtime: elegí polling por simplicidad
- * y porque 15s de latencia es aceptable en un tablero de producción.
- * Migrar a Realtime es un cambio localizado si lo necesitamos.
+ * Tras el refactor a items, cada tarjeta es UN componente físico, no
+ * una "etapa" abstracta de orden. Eso da una visión mucho más operativa
+ * del piso de planta.
  */
 
 const SECTORES: Array<{ codigo: SectorCodigo | 'all'; label: string }> = [
@@ -29,7 +29,7 @@ const INTERVALO_MS = 15_000
 
 export default function TableroEtapas() {
   const [sector, setSector] = useState<SectorCodigo | 'all'>('all')
-  const [etapas, setEtapas] = useState<EtapaEnTablero[] | null>(null)
+  const [items, setItems] = useState<ItemEnTablero[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [cargando, setCargando] = useState(false)
   const [ultimaActualizacion, setUltimaActualizacion] = useState<Date | null>(null)
@@ -40,7 +40,7 @@ export default function TableroEtapas() {
     setError(null)
     try {
       const data = await cargarTablero(sector)
-      setEtapas(data)
+      setItems(data)
       setUltimaActualizacion(new Date())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al cargar el tablero')
@@ -60,31 +60,31 @@ export default function TableroEtapas() {
   }, [sector])
 
   const resumen = useMemo(() => {
-    if (!etapas) return { pendiente: 0, en_proceso: 0, demorada: 0 }
-    return etapas.reduce(
+    if (!items) return { pendiente: 0, en_proceso: 0, demorada: 0 }
+    return items.reduce(
       (acc, e) => {
-        if (e.etapa.estado === 'pendiente') acc.pendiente++
-        else if (e.etapa.estado === 'en_proceso') acc.en_proceso++
-        else if (e.etapa.estado === 'demorada') acc.demorada++
+        if (e.item.estado === 'pendiente') acc.pendiente++
+        else if (e.item.estado === 'en_proceso') acc.en_proceso++
+        else if (e.item.estado === 'demorada') acc.demorada++
         return acc
       },
       { pendiente: 0, en_proceso: 0, demorada: 0 },
     )
-  }, [etapas])
+  }, [items])
 
   // Ordenamos: demoradas primero (urgencia), luego en_proceso, luego pendientes,
   // y dentro de cada grupo por fecha de entrega.
   const ordenadas = useMemo(() => {
-    if (!etapas) return []
+    if (!items) return []
     const prio = { demorada: 0, en_proceso: 1, pendiente: 2, completada: 3 } as const
-    return [...etapas].sort((a, b) => {
-      const p = prio[a.etapa.estado] - prio[b.etapa.estado]
+    return [...items].sort((a, b) => {
+      const p = prio[a.item.estado] - prio[b.item.estado]
       if (p !== 0) return p
       const fa = a.orden.fecha_entrega_estimada ?? '9999-12-31'
       const fb = b.orden.fecha_entrega_estimada ?? '9999-12-31'
       return fa.localeCompare(fb)
     })
-  }, [etapas])
+  }, [items])
 
   return (
     <div className="p-6 space-y-4">
@@ -140,20 +140,20 @@ export default function TableroEtapas() {
         </div>
       )}
 
-      {etapas === null && <p className="text-slate-400">Cargando tablero…</p>}
+      {items === null && <p className="text-slate-400">Cargando tablero…</p>}
 
-      {etapas && etapas.length === 0 && (
+      {items && items.length === 0 && (
         <div className="py-16 text-center text-slate-500">
           <p className="text-touch-base">
-            No hay etapas activas{sector !== 'all' ? ' en este sector' : ''}.
+            No hay items activos{sector !== 'all' ? ' en este sector' : ''}.
           </p>
         </div>
       )}
 
       {/* Grid de tarjetas */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {ordenadas.map((e) => (
-          <EtapaCard key={e.etapa.id} data={e} />
+        {ordenadas.map((it) => (
+          <ItemCard key={it.item.id} data={it} />
         ))}
       </div>
     </div>
@@ -169,9 +169,9 @@ function Kpi({ label, valor, color }: { label: string; valor: number | string; c
   )
 }
 
-function EtapaCard({ data }: { data: EtapaEnTablero }) {
-  const { etapa, orden, puesto, operarioActual, demoraActiva } = data
-  const estado = etapa.estado
+function ItemCard({ data }: { data: ItemEnTablero }) {
+  const { item, orden, puesto, operarioAsignado, demoraActiva } = data
+  const estado = item.estado
   const color =
     estado === 'demorada'
       ? 'border-red-500 bg-red-950/40'
@@ -193,23 +193,44 @@ function EtapaCard({ data }: { data: EtapaEnTablero }) {
 
   return (
     <div className={`rounded-xl border-l-4 ${color} border border-slate-700 p-4 flex flex-col gap-3 shadow-lg`}>
-      {/* Header: orden + badge */}
+      {/* Header: pieza + badge */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-touch-lg font-bold text-inelpa-accent truncate">
-            {orden.codigo}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="text-touch-base font-bold text-inelpa-accent truncate">
+              {data.pieza_codigo}
+            </div>
+            {data.fase && (
+              <span className="text-xs font-bold px-2 py-0.5 rounded bg-violet-700 text-white">
+                {data.fase}
+              </span>
+            )}
+            {data.tipo === 'ensamble_final' && (
+              <span className="text-xs font-bold px-2 py-0.5 rounded bg-orange-700 text-white">
+                ENSAMBLE
+              </span>
+            )}
           </div>
-          {orden.cliente && (
-            <div className="text-sm text-slate-300 truncate">{orden.cliente}</div>
-          )}
+          <div className="text-xs text-slate-400 mt-1">
+            <span className="font-semibold text-slate-300">{orden.codigo}</span>
+            {' · '}
+            Unidad {data.unidad_index}/{orden.cantidad_unidades}
+            {orden.cliente && <> · {orden.cliente}</>}
+          </div>
         </div>
         <span className={`text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap ${badge}`}>
           {badgeLabel}
         </span>
       </div>
 
-      {orden.descripcion && (
-        <div className="text-xs text-slate-400 line-clamp-2">{orden.descripcion}</div>
+      {data.codigo_interno_fabricacion && (
+        <div className="text-xs font-mono text-amber-300 bg-slate-800/60 rounded px-2 py-1 inline-block self-start">
+          {data.codigo_interno_fabricacion}
+        </div>
+      )}
+
+      {data.pieza_descripcion && (
+        <div className="text-xs text-slate-400 line-clamp-2">{data.pieza_descripcion}</div>
       )}
 
       {/* Demora activa destacada */}
@@ -228,9 +249,9 @@ function EtapaCard({ data }: { data: EtapaEnTablero }) {
         </div>
       )}
 
-      {/* Datos de la etapa */}
+      {/* Datos del item */}
       <div className="grid grid-cols-2 gap-2 text-sm">
-        <Dato label="Sector" valor={labelSectorCorto(etapa.sector_codigo)} />
+        <Dato label="Sector" valor={labelSectorCorto(item.sector_codigo)} />
         <Dato
           label="Puesto"
           valor={puesto?.nombre ?? '—'}
@@ -238,8 +259,8 @@ function EtapaCard({ data }: { data: EtapaEnTablero }) {
         <Dato
           label="Operario"
           valor={
-            operarioActual
-              ? `${operarioActual.nombre} ${operarioActual.apellido}`
+            operarioAsignado
+              ? `${operarioAsignado.nombre} ${operarioAsignado.apellido}`
               : '—'
           }
         />
@@ -257,7 +278,7 @@ function EtapaCard({ data }: { data: EtapaEnTablero }) {
       <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
         <span>
           {data.totalDemoras} demora{data.totalDemoras === 1 ? '' : 's'} totales
-          {etapa.inicio_real_at && ` · activa ${formatoMinutos(data.minutosTotalActivo)}`}
+          {item.inicio_real_at && ` · activa ${formatoMinutos(data.minutosTotalActivo)}`}
         </span>
         {orden.fecha_entrega_estimada && (
           <span title="Fecha de entrega estimada">📅 {orden.fecha_entrega_estimada}</span>

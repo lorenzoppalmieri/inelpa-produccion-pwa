@@ -48,8 +48,27 @@ export type TipoPuesto = 'maquina' | 'box' | 'equipo'
 
 export type SyncStatus = 'pending' | 'synced' | 'error'
 
+// Catálogo de productos
+export type FamiliaPT =
+  | 'TMR07V' | 'TMR19V'
+  | 'TBR13V' | 'TBR33V'
+  | 'TTR13V' | 'TTR33V'
+  | 'TTD13V' | 'TTD33V'
+
+export type FamiliaSE =
+  | 'BOBALT' | 'BOBBAJ'
+  | 'CUBRUR' | 'CUBDIS'
+  | 'TANDIS'
+  | 'TAPRUR' | 'TAPDIS'
+  | 'PARRUR' | 'PARDIS'
+
+export type TipoTransformador = 'monofasico' | 'bifasico' | 'trifasico'
+export type TipoItem = 'semielaborado' | 'ensamble_final'
+export type FaseBobina = 'F1' | 'F2' | 'F3'
+export type Conductor = 'CU' | 'AL'
+
 // -----------------------------------------------------------------
-// Entidades
+// Catálogos
 // -----------------------------------------------------------------
 
 export interface Sector {
@@ -86,49 +105,106 @@ export interface CausaDemora {
   notas?: string
 }
 
+export interface ProductoTerminado {
+  codigo: string // 'TTD13V0000001'
+  descripcion: string
+  familia: FamiliaPT
+  tipo: TipoTransformador
+  potencia_kva: number
+  tension_kv: number
+  conductor: Conductor
+  diseno_cuba: string | null
+  lleva_tanque_expansion: boolean
+  activo: boolean
+}
+
+export interface Semielaborado {
+  codigo: string // 'BOBALT0000096'
+  descripcion: string
+  familia: FamiliaSE
+  sector_codigo: SectorCodigo
+  potencia_kva: number | null
+  tension_kv: number | null
+  conductor: Conductor | null
+  aplicacion: 'rural' | 'distribucion' | null
+  tipo: TipoTransformador | null
+  diseno_cuba: string | null
+  variante: string | null
+  forma: string | null
+  fase: FaseBobina | null
+  activo: boolean
+}
+
+export interface BomItem {
+  id: string
+  producto_terminado_codigo: string
+  semielaborado_codigo: string
+  cantidad: number
+  fase: FaseBobina | null
+}
+
+// -----------------------------------------------------------------
+// Operación
+// -----------------------------------------------------------------
+
 export interface OrdenFabricacion {
   id: string
   codigo: string
   descripcion: string | null
   cliente: string | null
   estado: EstadoOrden
-  fecha_entrega_estimada: string | null // ISO date
-}
-
-export interface EtapaOrden {
-  id: string
-  orden_id: string
-  sector_codigo: SectorCodigo
-  secuencia: number
-  estado: EstadoEtapa
-  puesto_trabajo_id: string | null
-  inicio_real_at: string | null // ISO timestamp
-  fin_real_at: string | null
+  fecha_entrega_estimada: string | null
+  producto_terminado_codigo: string | null
+  cantidad_unidades: number
+  prioridad: number
 }
 
 /**
- * Evento es el registro de hecho: todo lo que hace un operario queda acá.
- * El `id` se genera en el cliente (UUID v4) para consistencia offline.
+ * Un ítem es UNA pieza física a fabricar para una orden:
+ *   - una bobina F1, F2 o F3 (BOBALT/BOBBAJ)
+ *   - una cuba, tapa, tanque o parte activa
+ *   - un ensamble final (montajes-ph)
+ *
+ * El planificador asigna puesto + operario + fechas antes de que
+ * el operario lo vea en su cola.
+ */
+export interface ItemOrden {
+  id: string
+  orden_id: string
+  tipo: TipoItem
+  semielaborado_codigo: string | null
+  producto_terminado_codigo: string | null
+  unidad_index: number
+  fase: FaseBobina | null
+  codigo_interno_fabricacion: string | null
+  sector_codigo: SectorCodigo
+  puesto_trabajo_id: string | null
+  operario_id: string | null
+  inicio_planificado: string | null
+  fin_planificado: string | null
+  estado: EstadoEtapa
+  inicio_real_at: string | null
+  fin_real_at: string | null
+  prioridad: number
+}
+
+/**
+ * Evento de producción. id se genera en cliente (UUID v4) para offline-first.
  */
 export interface Evento {
   id: string
-  etapa_orden_id: string
+  item_orden_id: string
   operario_id: string
   puesto_trabajo_id: string | null
   tipo: TipoEvento
-  timestamp: string // ISO — hora real del PC panel al crear el evento
-
-  /** Sólo aplica cuando tipo = 'DEMORA_INICIO' */
+  timestamp: string
   causa_demora_codigo?: string
-
-  /** Sólo aplica cuando tipo = 'DEMORA_FIN' — referencia al DEMORA_INICIO que cierra */
   evento_demora_inicio_id?: string
-
   observacion?: string
   cliente_timestamp: string
   cliente_online: boolean
 
-  // Campos locales (no van a Supabase, viven sólo en Dexie)
+  // Locales (no van a Supabase)
   sync_status: SyncStatus
   sync_error?: string
   sync_attempted_at?: string
@@ -138,16 +214,19 @@ export interface Evento {
 // Tipos compuestos / convenientes para UI
 // -----------------------------------------------------------------
 
-/** Etapa + datos de la orden, para listas de trabajo */
-export interface EtapaConOrden extends EtapaOrden {
-  orden: Pick<OrdenFabricacion, 'codigo' | 'descripcion' | 'cliente'>
+/** Item con datos de orden + descripción de la pieza, para listas */
+export interface ItemConDetalle extends ItemOrden {
+  orden: Pick<OrdenFabricacion, 'codigo' | 'descripcion' | 'cliente' | 'cantidad_unidades'>
+  pieza_codigo: string
+  pieza_descripcion: string
+  puesto_nombre: string | null
+  operario_nombre: string | null
 }
 
-/** Demora pareada (vista v_demoras en Postgres) */
 export interface DemoraPareada {
   demora_inicio_id: string
   demora_fin_id: string | null
-  etapa_orden_id: string
+  item_orden_id: string
   operario_id: string
   causa_demora_codigo: string
   causa_descripcion: string

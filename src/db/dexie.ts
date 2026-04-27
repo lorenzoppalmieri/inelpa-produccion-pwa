@@ -6,21 +6,21 @@ import type {
   Operario,
   PuestoTrabajo,
   OrdenFabricacion,
-  EtapaOrden,
+  ProductoTerminado,
+  Semielaborado,
+  BomItem,
+  ItemOrden,
 } from '../types'
 
 /**
  * Base de datos local en IndexedDB.
  *
  * Diseño clave:
- *  - `eventos`: cola de eventos. Todo evento se persiste acá PRIMERO;
- *    la sincronización a Supabase es asíncrona y puede reintentarse.
- *  - `catálogos` (sectores, puestos, operarios, causas): cache de sólo lectura
- *    que se refresca al arrancar la PWA si hay red. Permite que el login
- *    por PIN y la selección de etapas funcionen offline.
- *  - `ordenes` y `etapas`: también cacheados para permitir trabajo offline
- *    completo (ver la cola de etapas sin red).
- *  - `kv`: key-value genérico para metadatos (última sincronización, sesión activa, etc.).
+ *  - `eventos`: cola offline-first; se escribe localmente y luego sincroniza a Supabase.
+ *  - `catálogos` (sectores, puestos, operarios, causas, productos, semielaborados, bom):
+ *    cache de sólo lectura, refrescado al arrancar si hay red.
+ *  - `ordenes` y `items`: datos operativos, también cacheados para trabajar offline.
+ *  - `kv`: key-value genérico para metadatos.
  */
 
 export interface KV {
@@ -35,23 +35,23 @@ export class InelpaDB extends Dexie {
   puestos!: Table<PuestoTrabajo, string>
   operarios!: Table<Operario, string>
   ordenes!: Table<OrdenFabricacion, string>
-  etapas!: Table<EtapaOrden, string>
+  productosTerminados!: Table<ProductoTerminado, string>
+  semielaborados!: Table<Semielaborado, string>
+  bom!: Table<BomItem, string>
+  items!: Table<ItemOrden, string>
   kv!: Table<KV, string>
 
   constructor() {
     super('inelpa-produccion')
 
-    // v1 — versión inicial con stubs (scaffold)
+    // v1 — scaffold
     this.version(1).stores({
       eventos: 'id, syncStatus, timestamp, contratoId, sectorId',
       causasDemora: 'codigo, categoria, activa',
       kv: 'key',
     })
 
-    // v2 — modelo real (2026-04-22)
-    // - Se renombran índices a la convención snake_case del SQL.
-    // - Se agregan tablas de catálogo y órdenes/etapas.
-    // - `sync_status` reemplaza a `syncStatus`.
+    // v2 — modelo "etapas_orden"
     this.version(2)
       .stores({
         eventos: 'id, sync_status, timestamp, etapa_orden_id, operario_id, tipo',
@@ -64,14 +64,43 @@ export class InelpaDB extends Dexie {
         kv: 'key',
       })
       .upgrade(async (tx) => {
-        // Migración de eventos v1 → v2:
-        // Los eventos antiguos (del scaffold) no cumplen el nuevo esquema;
-        // los marcamos para revisión manual en lugar de borrarlos.
         const eventos = await tx.table('eventos').toArray()
         for (const e of eventos) {
           if ('syncStatus' in e) {
             e.sync_status = e.syncStatus
             delete e.syncStatus
+          }
+          await tx.table('eventos').put(e)
+        }
+      })
+
+    // v3 — modelo "items_orden" (BOM expandida) — 2026-04-26
+    // Reemplaza `etapas_orden` por `items_orden` y agrega catálogo de productos.
+    // Eventos ahora apuntan a item_orden_id en lugar de etapa_orden_id.
+    this.version(3)
+      .stores({
+        eventos: 'id, sync_status, timestamp, item_orden_id, operario_id, tipo',
+        causasDemora: 'codigo, categoria, *sectores_aplicables, activa',
+        sectores: 'codigo, orden_secuencia',
+        puestos: 'id, sector_codigo',
+        operarios: 'id, pin, sector_codigo',
+        ordenes: 'id, codigo, estado, producto_terminado_codigo',
+        productosTerminados: 'codigo, familia, tipo, activo',
+        semielaborados: 'codigo, familia, sector_codigo, activo',
+        bom: 'id, producto_terminado_codigo, semielaborado_codigo',
+        items: 'id, orden_id, sector_codigo, estado, puesto_trabajo_id, operario_id, prioridad',
+        // Tabla `etapas` se elimina; Dexie la borra al cambiar el schema.
+        etapas: null,
+        kv: 'key',
+      })
+      .upgrade(async (tx) => {
+        // Migrar eventos: etapa_orden_id → item_orden_id (mismo valor, otro nombre).
+        // En la práctica, los eventos de v2 son de prueba; los renombramos para no romper.
+        const eventos = await tx.table('eventos').toArray()
+        for (const e of eventos) {
+          if ('etapa_orden_id' in e && !('item_orden_id' in e)) {
+            e.item_orden_id = e.etapa_orden_id
+            delete e.etapa_orden_id
           }
           await tx.table('eventos').put(e)
         }

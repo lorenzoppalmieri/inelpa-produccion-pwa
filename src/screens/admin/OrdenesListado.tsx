@@ -3,26 +3,22 @@ import { supabase } from '../../lib/supabase'
 import { syncCatalogos } from '../../db/syncCatalogos'
 import type {
   OrdenFabricacion,
-  EtapaOrden,
+  ItemOrden,
   EstadoOrden,
-  EstadoEtapa,
   SectorCodigo,
 } from '../../types'
 
 /**
- * Listado de órdenes con progreso de etapas y acción de cancelar.
+ * Listado de órdenes con progreso por sector y acción de cancelar.
  *
- * Por qué bajamos directo de Supabase y no usamos Dexie acá:
- *  - El admin quiere ver el estado MÁS actual, incluido órdenes
- *    recién creadas desde otro PC.
- *  - El listado se refresca manualmente o al entrar a la tab.
- *  - Incluye órdenes completadas y canceladas (filtro), que Dexie no cachea.
+ * El "progreso" se calcula contando items por sector y su estado.
+ * Bajamos directo de Supabase (no Dexie) para tener el estado más actual.
  */
 
 type Filtro = 'activas' | 'todas' | 'completadas' | 'canceladas'
 
-interface OrdenConEtapas extends OrdenFabricacion {
-  etapas: EtapaOrden[]
+interface OrdenConItems extends OrdenFabricacion {
+  items: ItemOrden[]
 }
 
 const BADGE_ORDEN: Record<EstadoOrden, { label: string; clases: string }> = {
@@ -32,15 +28,16 @@ const BADGE_ORDEN: Record<EstadoOrden, { label: string; clases: string }> = {
   cancelada: { label: 'Cancelada', clases: 'bg-red-800 text-red-100' },
 }
 
-const DOT_ETAPA: Record<EstadoEtapa, string> = {
-  pendiente: 'bg-slate-500',
-  en_proceso: 'bg-emerald-500',
-  demorada: 'bg-red-500',
-  completada: 'bg-sky-500',
-}
+const SECTORES: SectorCodigo[] = [
+  'bobinado-at',
+  'bobinado-bt',
+  'herreria',
+  'montajes-pa',
+  'montajes-ph',
+]
 
 export default function OrdenesListado() {
-  const [ordenes, setOrdenes] = useState<OrdenConEtapas[] | null>(null)
+  const [ordenes, setOrdenes] = useState<OrdenConItems[] | null>(null)
   const [filtro, setFiltro] = useState<Filtro>('activas')
   const [error, setError] = useState<string | null>(null)
   const [cargando, setCargando] = useState(false)
@@ -67,24 +64,23 @@ export default function OrdenesListado() {
         return
       }
 
-      const { data: es, error: errE } = await supabase
-        .from('etapas_orden')
+      const { data: items, error: errI } = await supabase
+        .from('items_orden')
         .select('*')
         .in('orden_id', ids)
-        .order('secuencia', { ascending: true })
-      if (errE) throw errE
+      if (errI) throw errI
 
-      const porOrden = new Map<string, EtapaOrden[]>()
-      for (const e of es ?? []) {
-        const arr = porOrden.get(e.orden_id) ?? []
-        arr.push(e as EtapaOrden)
-        porOrden.set(e.orden_id, arr)
+      const porOrden = new Map<string, ItemOrden[]>()
+      for (const i of items ?? []) {
+        const arr = porOrden.get(i.orden_id) ?? []
+        arr.push(i as ItemOrden)
+        porOrden.set(i.orden_id, arr)
       }
 
       setOrdenes(
         (os ?? []).map((o) => ({
           ...(o as OrdenFabricacion),
-          etapas: porOrden.get(o.id) ?? [],
+          items: porOrden.get(o.id) ?? [],
         })),
       )
     } catch (err) {
@@ -99,7 +95,7 @@ export default function OrdenesListado() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtro])
 
-  const cancelarOrden = async (orden: OrdenConEtapas) => {
+  const cancelarOrden = async (orden: OrdenConItems) => {
     if (
       !confirm(
         `¿Seguro que querés cancelar la orden ${orden.codigo}?\n\nEsto NO borra los eventos ya registrados, pero la saca del panel de operarios.`,
@@ -172,7 +168,7 @@ function OrdenRow({
   orden,
   onCancelar,
 }: {
-  orden: OrdenConEtapas
+  orden: OrdenConItems
   onCancelar: () => void
 }) {
   const badge = BADGE_ORDEN[orden.estado]
@@ -187,6 +183,11 @@ function OrdenRow({
             <span className={`text-xs font-semibold px-3 py-1 rounded-full ${badge.clases}`}>
               {badge.label}
             </span>
+            {orden.producto_terminado_codigo && (
+              <span className="text-xs font-mono text-slate-300">
+                {orden.producto_terminado_codigo} × {orden.cantidad_unidades}
+              </span>
+            )}
           </div>
           {orden.cliente && (
             <div className="text-slate-300 text-sm mt-1">{orden.cliente}</div>
@@ -211,27 +212,53 @@ function OrdenRow({
         )}
       </div>
 
-      <ProgresoEtapas etapas={orden.etapas} />
+      <ProgresoSectores items={orden.items} />
     </div>
   )
 }
 
-function ProgresoEtapas({ etapas }: { etapas: EtapaOrden[] }) {
-  if (etapas.length === 0) {
-    return <p className="text-xs text-slate-500 italic">Sin etapas configuradas.</p>
+function ProgresoSectores({ items }: { items: ItemOrden[] }) {
+  if (items.length === 0) {
+    return (
+      <p className="text-xs text-slate-500 italic">
+        Sin items expandidos. Crear nueva orden con BOM.
+      </p>
+    )
   }
+
+  // Agrupar items por sector y contar estados
+  const porSector = new Map<SectorCodigo, { total: number; completados: number; en_curso: number }>()
+  for (const i of items) {
+    const stats = porSector.get(i.sector_codigo) ?? { total: 0, completados: 0, en_curso: 0 }
+    stats.total++
+    if (i.estado === 'completada') stats.completados++
+    else if (i.estado === 'en_proceso' || i.estado === 'demorada') stats.en_curso++
+    porSector.set(i.sector_codigo, stats)
+  }
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {etapas.map((e, idx) => (
-        <div key={e.id} className="flex items-center gap-2">
-          <div
-            className={`w-3 h-3 rounded-full ${DOT_ETAPA[e.estado]}`}
-            title={`${labelSector(e.sector_codigo)} — ${e.estado}`}
-          />
-          <span className="text-xs text-slate-300">{labelSector(e.sector_codigo)}</span>
-          {idx < etapas.length - 1 && <span className="text-slate-600">→</span>}
-        </div>
-      ))}
+    <div className="flex flex-wrap items-center gap-3">
+      {SECTORES.filter((s) => porSector.has(s)).map((s) => {
+        const stats = porSector.get(s)!
+        const pct = Math.round((stats.completados / stats.total) * 100)
+        const color =
+          pct === 100
+            ? 'bg-sky-500'
+            : stats.en_curso > 0
+              ? 'bg-emerald-500'
+              : 'bg-slate-500'
+        return (
+          <div key={s} className="flex items-center gap-2">
+            <div className={`w-3 h-3 rounded-full ${color}`} title={`${pct}% completo`} />
+            <span className="text-xs text-slate-300">
+              {labelSector(s)}{' '}
+              <span className="text-slate-500">
+                {stats.completados}/{stats.total}
+              </span>
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -1,23 +1,40 @@
 import { supabase } from '../../lib/supabase'
 import type {
   EstadoEtapa,
-  EtapaOrden,
+  ItemOrden,
   OrdenFabricacion,
   PuestoTrabajo,
   Operario,
+  Semielaborado,
+  ProductoTerminado,
   SectorCodigo,
   TipoEvento,
+  FaseBobina,
+  TipoItem,
 } from '../../types'
 
 /**
  * Estructura enriquecida que consume el tablero del supervisor.
  * Mantiene toda la info necesaria para pintar una tarjeta sin queries extra.
+ *
+ * Tras el refactor a "items_orden", cada tarjeta corresponde a un item
+ * (una bobina F1, una cuba, un ensamble, etc) — no a una etapa de sector
+ * a nivel de orden completa.
  */
-export interface EtapaEnTablero {
-  etapa: EtapaOrden
-  orden: Pick<OrdenFabricacion, 'codigo' | 'cliente' | 'descripcion' | 'fecha_entrega_estimada'>
+export interface ItemEnTablero {
+  item: ItemOrden
+  orden: Pick<
+    OrdenFabricacion,
+    'codigo' | 'cliente' | 'descripcion' | 'fecha_entrega_estimada' | 'cantidad_unidades'
+  >
+  pieza_codigo: string
+  pieza_descripcion: string
+  tipo: TipoItem
+  fase: FaseBobina | null
+  unidad_index: number
+  codigo_interno_fabricacion: string | null
   puesto: Pick<PuestoTrabajo, 'nombre' | 'tipo'> | null
-  operarioActual: Pick<Operario, 'nombre' | 'apellido'> | null
+  operarioAsignado: Pick<Operario, 'nombre' | 'apellido'> | null
   // Derivados de eventos
   totalDemoras: number
   minutosEnEstado: number
@@ -34,15 +51,18 @@ export interface EtapaEnTablero {
   ultimoEventoAt: string | null
 }
 
-// Forma cruda del resultado de Supabase (lo que pide el tablero vía joins).
-interface EtapaRaw extends EtapaOrden {
+// Forma cruda del resultado de Supabase con joins.
+interface ItemRaw extends ItemOrden {
   orden: OrdenFabricacion | null
   puesto: PuestoTrabajo | null
+  operario: Operario | null
+  semielaborado: Semielaborado | null
+  producto_terminado: ProductoTerminado | null
 }
 
 interface EventoRaw {
   id: string
-  etapa_orden_id: string
+  item_orden_id: string
   operario_id: string
   tipo: TipoEvento
   timestamp: string
@@ -54,83 +74,81 @@ interface EventoRaw {
 /**
  * Descarga todo lo necesario para pintar el tablero y lo arma.
  *
- * Hacemos 4 queries en paralelo (órdenes se unen con etapas vía FK):
- *  - etapas activas + orden + puesto (un solo select con relaciones)
- *  - eventos de esas etapas (para derivados)
- *  - operarios (para resolver el "operario actual" por último INICIO)
+ * Hacemos queries en paralelo:
+ *  - items activos + orden + puesto + operario + semielaborado + PT
+ *  - eventos de esos items (para derivados)
  *  - causas (para mostrar descripción de demora abierta)
  *
  * Filtros:
  *  - Por sector opcional (o 'all' para ver todo).
- *  - Solo etapas en estado pendiente/en_proceso/demorada (las completadas
+ *  - Solo items en estado pendiente/en_proceso/demorada (las completadas
  *    no interesan en un tablero en vivo).
  */
 export async function cargarTablero(
   sector: SectorCodigo | 'all',
-): Promise<EtapaEnTablero[]> {
-  let etapasQuery = supabase
-    .from('etapas_orden')
+): Promise<ItemEnTablero[]> {
+  let q = supabase
+    .from('items_orden')
     .select(
       `
         *,
-        orden:ordenes_fabricacion(codigo, cliente, descripcion, fecha_entrega_estimada, estado),
-        puesto:puestos_trabajo(nombre, tipo)
+        orden:ordenes_fabricacion(codigo, cliente, descripcion, fecha_entrega_estimada, estado, cantidad_unidades),
+        puesto:puestos_trabajo(nombre, tipo),
+        operario:operarios(nombre, apellido),
+        semielaborado:semielaborados(codigo, descripcion),
+        producto_terminado:productos_terminados(codigo, descripcion)
       `,
     )
     .in('estado', ['pendiente', 'en_proceso', 'demorada'])
 
   if (sector !== 'all') {
-    etapasQuery = etapasQuery.eq('sector_codigo', sector)
+    q = q.eq('sector_codigo', sector)
   }
 
-  const { data: etapasRaw, error: errE } = await etapasQuery
-  if (errE) throw errE
-  const etapas = (etapasRaw ?? []) as unknown as EtapaRaw[]
+  const { data: itemsRaw, error: errI } = await q
+  if (errI) throw errI
+  const items = (itemsRaw ?? []) as unknown as ItemRaw[]
 
-  // Filtramos además órdenes canceladas (el estado de la etapa podría haber
-  // quedado 'pendiente' pero la orden estar cancelada → no mostrar).
-  const etapasVivas = etapas.filter(
-    (e) => e.orden && e.orden.estado !== 'cancelada',
+  // Filtramos órdenes canceladas/completadas (el item podría haber quedado
+  // 'pendiente' pero la orden ya estar cerrada → no mostrar).
+  const itemsVivos = items.filter(
+    (i) =>
+      i.orden &&
+      i.orden.estado !== 'cancelada' &&
+      i.orden.estado !== 'completada',
   )
 
-  const etapaIds = etapasVivas.map((e) => e.id)
-  if (etapaIds.length === 0) return []
+  const itemIds = itemsVivos.map((i) => i.id)
+  if (itemIds.length === 0) return []
 
-  const [{ data: evs, error: errEv }, { data: opsAll, error: errOp }, { data: causas, error: errC }] =
+  const [{ data: evs, error: errEv }, { data: causas, error: errC }] =
     await Promise.all([
       supabase
         .from('eventos')
         .select('*')
-        .in('etapa_orden_id', etapaIds)
+        .in('item_orden_id', itemIds)
         .order('timestamp', { ascending: true }),
-      supabase.from('operarios').select('id, nombre, apellido'),
       supabase.from('causas_demora').select('codigo, descripcion'),
     ])
 
   if (errEv) throw errEv
-  if (errOp) throw errOp
   if (errC) throw errC
 
   const eventos = (evs ?? []) as EventoRaw[]
-  const operariosById = new Map((opsAll ?? []).map((o) => [o.id, o]))
   const causasByCodigo = new Map(
     (causas ?? []).map((c) => [c.codigo, c.descripcion as string]),
   )
 
   const ahora = Date.now()
 
-  return etapasVivas.map((raw) => {
-    const deEtapa = eventos.filter((ev) => ev.etapa_orden_id === raw.id)
-    const demoraAbierta = encontrarDemoraAbierta(deEtapa)
-    const totalDemoras = deEtapa.filter((ev) => ev.tipo === 'DEMORA_INICIO').length
+  return itemsVivos.map((raw) => {
+    const deItem = eventos.filter((ev) => ev.item_orden_id === raw.id)
+    const demoraAbierta = encontrarDemoraAbierta(deItem)
+    const totalDemoras = deItem.filter((ev) => ev.tipo === 'DEMORA_INICIO').length
 
-    const ultimoInicio = [...deEtapa]
-      .reverse()
-      .find((ev) => ev.tipo === 'INICIO')
+    const ultimoEvento = deItem[deItem.length - 1] ?? null
 
-    const ultimoEvento = deEtapa[deEtapa.length - 1] ?? null
-
-    const refEstado = momentoUltimoCambioEstado(raw.estado, deEtapa, raw.inicio_real_at)
+    const refEstado = momentoUltimoCambioEstado(raw.estado, deItem, raw.inicio_real_at)
     const minutosEnEstado = refEstado
       ? Math.max(0, Math.floor((ahora - new Date(refEstado).getTime()) / 60_000))
       : 0
@@ -138,22 +156,41 @@ export async function cargarTablero(
       ? Math.max(0, Math.floor((ahora - new Date(raw.inicio_real_at).getTime()) / 60_000))
       : 0
 
-    const operarioId = ultimoInicio?.operario_id
-    const op = operarioId ? operariosById.get(operarioId) : null
+    const piezaCodigo =
+      raw.tipo === 'semielaborado'
+        ? raw.semielaborado?.codigo ?? raw.semielaborado_codigo ?? '(sin código)'
+        : raw.producto_terminado?.codigo ??
+          raw.producto_terminado_codigo ??
+          '(ensamble final)'
+
+    const piezaDescripcion =
+      raw.tipo === 'semielaborado'
+        ? raw.semielaborado?.descripcion ?? ''
+        : raw.producto_terminado?.descripcion ?? 'Ensamble final'
 
     return {
-      etapa: raw as unknown as EtapaOrden,
+      item: raw as unknown as ItemOrden,
       orden: {
         codigo: raw.orden!.codigo,
         cliente: raw.orden!.cliente,
         descripcion: raw.orden!.descripcion,
         fecha_entrega_estimada: raw.orden!.fecha_entrega_estimada,
+        cantidad_unidades: raw.orden!.cantidad_unidades,
       },
+      pieza_codigo: piezaCodigo,
+      pieza_descripcion: piezaDescripcion,
+      tipo: raw.tipo,
+      fase: raw.fase,
+      unidad_index: raw.unidad_index,
+      codigo_interno_fabricacion: raw.codigo_interno_fabricacion,
       puesto: raw.puesto
         ? { nombre: raw.puesto.nombre, tipo: raw.puesto.tipo }
         : null,
-      operarioActual: op
-        ? { nombre: op.nombre as string, apellido: op.apellido as string }
+      operarioAsignado: raw.operario
+        ? {
+            nombre: raw.operario.nombre as string,
+            apellido: raw.operario.apellido as string,
+          }
         : null,
       totalDemoras,
       minutosEnEstado,
@@ -167,7 +204,9 @@ export async function cargarTablero(
               : null,
             minutos_abierta: Math.max(
               0,
-              Math.floor((ahora - new Date(demoraAbierta.timestamp).getTime()) / 60_000),
+              Math.floor(
+                (ahora - new Date(demoraAbierta.timestamp).getTime()) / 60_000,
+              ),
             ),
             observacion: demoraAbierta.observacion,
           }
@@ -193,7 +232,7 @@ function encontrarDemoraAbierta(eventos: EventoRaw[]): EventoRaw | null {
 }
 
 /**
- * Devuelve el ISO timestamp en el que la etapa entró al estado actual
+ * Devuelve el ISO timestamp en el que el item entró al estado actual
  * (para calcular "tiempo en estado"). Heurística:
  *  - Si 'demorada': timestamp del DEMORA_INICIO abierto.
  *  - Si 'en_proceso': timestamp del último DEMORA_FIN, o del INICIO si no hubo demoras.

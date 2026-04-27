@@ -1,6 +1,6 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import LoginScreen from './screens/LoginScreen'
-import EtapasScreen from './screens/EtapasScreen'
+import MisItemsScreen from './screens/MisItemsScreen'
 import OperacionScreen from './screens/OperacionScreen'
 import AdminScreen from './screens/AdminScreen'
 import SupervisorScreen from './screens/SupervisorScreen'
@@ -84,15 +84,15 @@ export default function App() {
             }
           />
           <Route
-            path="/etapas"
+            path="/cola"
             element={
               <RequireAuth>
-                <EtapasScreen />
+                <MisItemsScreen />
               </RequireAuth>
             }
           />
           <Route
-            path="/operacion/:etapaId"
+            path="/operacion/:itemId"
             element={
               <RequireAuth>
                 <OperacionScreen />
@@ -101,8 +101,10 @@ export default function App() {
           />
           <Route path="/admin" element={<AdminScreen />} />
           <Route path="/supervisor" element={<SupervisorScreen />} />
-          <Route path="/" element={<Navigate to="/etapas" replace />} />
-          <Route path="*" element={<Navigate to="/etapas" replace />} />
+          {/* Compatibilidad con bookmarks viejos del modelo etapas */}
+          <Route path="/etapas" element={<Navigate to="/cola" replace />} />
+          <Route path="/" element={<Navigate to="/cola" replace />} />
+          <Route path="*" element={<Navigate to="/cola" replace />} />
         </Routes>
       </main>
     </div>
@@ -121,7 +123,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
 function RedirectIfAuth({ children }: { children: ReactNode }) {
   const { operario } = useSession()
   if (operario) {
-    return <Navigate to="/etapas" replace />
+    return <Navigate to="/cola" replace />
   }
   return <>{children}</>
 }

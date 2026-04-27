@@ -1,106 +1,98 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../../db/dexie'
 import { supabase } from '../../lib/supabase'
 import { syncCatalogos } from '../../db/syncCatalogos'
-import type { SectorCodigo, Sector } from '../../types'
+import type { ProductoTerminado } from '../../types'
 
 /**
- * Form para crear manualmente una orden de fabricación mientras no
- * tengamos la ingesta desde SAP B1.
+ * Form para crear órdenes de fabricación.
  *
- * Flujo:
- *  1. Datos de la orden (código, descripción, cliente, fecha entrega).
- *  2. Selección de qué sectores aplican para esta orden (con secuencia).
- *  3. Al confirmar: insert de la orden + insert bulk de etapas, una por
- *     sector elegido. La secuencia es el orden en que aparecen en la UI.
+ * El admin elige:
+ *  - Código de la orden (manual o desde SAP B1)
+ *  - Producto terminado (busca en el catálogo de 255 SKUs)
+ *  - Cantidad de unidades
+ *  - Cliente, fecha de entrega, prioridad
  *
- * Todo se hace contra Supabase con la anon key; las RLS de 0002 permiten
- * inserts desde anon. Tras crear, refrescamos catálogos locales (Dexie)
- * para que se vea en la PWA de los operarios sin esperar al loop de sync.
+ * Al confirmar:
+ *  1. Se crea la orden en `ordenes_fabricacion` con producto_terminado_codigo y cantidad.
+ *  2. Se llama a la función Postgres `expandir_bom_a_items(orden_id)` que
+ *     genera automáticamente todos los items (3 BOBALT + 3 BOBBAJ + 1 cuba +
+ *     1 tapa + 1 PA + 1 ensamble por unidad, según la BOM del PT).
+ *  3. Se sincroniza Dexie para que el planificador los vea.
  */
-
-// Todos los sectores del proceso en el orden "típico" de fabricación de
-// un transformador. El admin puede desmarcar los que no apliquen y
-// reordenar via los botones ↑ ↓.
-const SECTOR_POR_DEFECTO: { codigo: SectorCodigo; label: string }[] = [
-  { codigo: 'bobinado-at', label: 'Bobinado AT' },
-  { codigo: 'bobinado-bt', label: 'Bobinado BT' },
-  { codigo: 'herreria', label: 'Herrería' },
-  { codigo: 'montajes-pa', label: 'Montajes PA (pre-horno)' },
-  { codigo: 'montajes-ph', label: 'Montajes PH (post-horno)' },
-]
-
-interface SectorSel {
-  codigo: SectorCodigo
-  label: string
-  activo: boolean
-}
 
 interface Props {
   onCreada: () => void
 }
 
 export default function NuevaOrdenForm({ onCreada }: Props) {
-  const sectoresDisponibles = useLiveQuery(
-    () => db.sectores.toArray(),
+  const productos = useLiveQuery(
+    () => db.productosTerminados.toArray(),
     [],
-    [] as Sector[],
+    [] as ProductoTerminado[],
   )
 
-  const [codigo, setCodigo] = useState('')
-  const [descripcion, setDescripcion] = useState('')
+  const [codigoOrden, setCodigoOrden] = useState('')
+  const [productoCodigo, setProductoCodigo] = useState('')
+  const [busqueda, setBusqueda] = useState('')
+  const [cantidad, setCantidad] = useState(1)
   const [cliente, setCliente] = useState('')
   const [fechaEntrega, setFechaEntrega] = useState('')
-  const [sectores, setSectores] = useState<SectorSel[]>(
-    SECTOR_POR_DEFECTO.map((s) => ({ ...s, activo: true })),
-  )
+  const [prioridad, setPrioridad] = useState(100)
   const [trabajando, setTrabajando] = useState(false)
   const [mensaje, setMensaje] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null)
 
-  // Si Dexie trae labels reales del catálogo, usarlos (p.ej. si el nombre
-  // del sector cambió en la tabla).
-  const labelPara = (codigo: SectorCodigo): string => {
-    const real = sectoresDisponibles.find((s) => s.codigo === codigo)
-    return real?.nombre ?? SECTOR_POR_DEFECTO.find((s) => s.codigo === codigo)?.label ?? codigo
-  }
+  // Filtrado en cliente: el catálogo es chico (≤500 PTs) — un includes basta.
+  const productosFiltrados = useMemo(() => {
+    if (!busqueda.trim()) return productos.slice(0, 50)
+    const q = busqueda.toLowerCase()
+    return productos
+      .filter(
+        (p) =>
+          p.codigo.toLowerCase().includes(q) ||
+          p.descripcion.toLowerCase().includes(q),
+      )
+      .slice(0, 50)
+  }, [productos, busqueda])
 
-  const toggleSector = (codigo: SectorCodigo) => {
-    setSectores((prev) =>
-      prev.map((s) => (s.codigo === codigo ? { ...s, activo: !s.activo } : s)),
-    )
-  }
+  const productoSeleccionado = useMemo(
+    () => productos.find((p) => p.codigo === productoCodigo) ?? null,
+    [productos, productoCodigo],
+  )
 
-  const mover = (index: number, delta: -1 | 1) => {
-    setSectores((prev) => {
-      const nuevo = [...prev]
-      const target = index + delta
-      if (target < 0 || target >= nuevo.length) return prev
-      ;[nuevo[index], nuevo[target]] = [nuevo[target], nuevo[index]]
-      return nuevo
-    })
-  }
+  // Cantidad de items que se van a generar (preview): 3+3+1+1+1+1=9 trif, 1+1+1+1+1+1=6 mono/bif
+  const itemsAGenerar = useMemo(() => {
+    if (!productoSeleccionado) return 0
+    const porUnidad = productoSeleccionado.tipo === 'trifasico' ? 9 : 6
+    return porUnidad * cantidad
+  }, [productoSeleccionado, cantidad])
 
   const reset = () => {
-    setCodigo('')
-    setDescripcion('')
+    setCodigoOrden('')
+    setProductoCodigo('')
+    setBusqueda('')
+    setCantidad(1)
     setCliente('')
     setFechaEntrega('')
-    setSectores(SECTOR_POR_DEFECTO.map((s) => ({ ...s, activo: true })))
+    setPrioridad(100)
   }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (trabajando) return
 
-    const codigoLimpio = codigo.trim()
+    const codigoLimpio = codigoOrden.trim()
     if (!codigoLimpio) {
       setMensaje({ tipo: 'error', texto: 'El código de la orden es obligatorio.' })
       return
     }
-    const sectoresActivos = sectores.filter((s) => s.activo)
-    if (sectoresActivos.length === 0) {
-      setMensaje({ tipo: 'error', texto: 'Seleccioná al menos un sector.' })
+    if (!productoSeleccionado) {
+      setMensaje({ tipo: 'error', texto: 'Elegí un producto terminado.' })
+      return
+    }
+    if (cantidad < 1) {
+      setMensaje({ tipo: 'error', texto: 'La cantidad debe ser al menos 1.' })
       return
     }
 
@@ -113,10 +105,13 @@ export default function NuevaOrdenForm({ onCreada }: Props) {
         .from('ordenes_fabricacion')
         .insert({
           codigo: codigoLimpio,
-          descripcion: descripcion.trim() || null,
+          descripcion: productoSeleccionado.descripcion,
           cliente: cliente.trim() || null,
           fecha_entrega_estimada: fechaEntrega || null,
           estado: 'pendiente',
+          producto_terminado_codigo: productoSeleccionado.codigo,
+          cantidad_unidades: cantidad,
+          prioridad,
         })
         .select()
         .single()
@@ -125,32 +120,30 @@ export default function NuevaOrdenForm({ onCreada }: Props) {
         throw new Error(errOrden?.message ?? 'No se pudo crear la orden')
       }
 
-      // 2) Crear las etapas (una por sector seleccionado)
-      const etapas = sectoresActivos.map((s, idx) => ({
-        orden_id: orden.id,
-        sector_codigo: s.codigo,
-        secuencia: idx + 1,
-        estado: 'pendiente' as const,
-      }))
-      const { error: errEtapas } = await supabase.from('etapas_orden').insert(etapas)
+      // 2) Expandir BOM → items (server-side via RPC)
+      const { error: errExpand } = await supabase.rpc('expandir_bom_a_items', {
+        p_orden_id: orden.id,
+      })
 
-      if (errEtapas) {
-        // Rollback manual: borramos la orden para no dejar basura.
+      if (errExpand) {
+        // Rollback manual
         await supabase.from('ordenes_fabricacion').delete().eq('id', orden.id)
-        throw new Error(`No se pudieron crear las etapas: ${errEtapas.message}`)
+        throw new Error(`No se pudo expandir la BOM: ${errExpand.message}`)
       }
 
-      // 3) Refrescar catálogos locales para que los operarios la vean ya
+      // 3) Sync Dexie para que aparezca en planificador / operarios
       await syncCatalogos()
 
-      setMensaje({ tipo: 'ok', texto: `Orden ${codigoLimpio} creada con ${etapas.length} etapas.` })
+      setMensaje({
+        tipo: 'ok',
+        texto: `Orden ${codigoLimpio} creada con ~${itemsAGenerar} items. Asignar puestos en el planificador.`,
+      })
       reset()
 
-      // Saltamos a la tab de listado después de un breve delay
       setTimeout(() => {
         setMensaje(null)
         onCreada()
-      }, 1200)
+      }, 1500)
     } catch (err) {
       const texto = err instanceof Error ? err.message : 'Error inesperado'
       setMensaje({ tipo: 'error', texto })
@@ -162,27 +155,95 @@ export default function NuevaOrdenForm({ onCreada }: Props) {
   return (
     <form onSubmit={submit} className="p-6 max-w-3xl mx-auto space-y-6">
       <div className="space-y-4">
-        <h2 className="text-touch-lg font-bold">Datos de la orden</h2>
+        <h2 className="text-touch-lg font-bold">Nueva orden de fabricación</h2>
 
-        <Campo label="Código *" hint="Formato: OF-AAAA-NNN (ej: OF-2026-007)">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Campo label="Código *" hint="Ej: OF-2026-007">
+            <input
+              value={codigoOrden}
+              onChange={(e) => setCodigoOrden(e.target.value.toUpperCase())}
+              placeholder="OF-2026-007"
+              required
+              className="input"
+            />
+          </Campo>
+
+          <Campo label="Cantidad de unidades *">
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={cantidad}
+              onChange={(e) => setCantidad(parseInt(e.target.value) || 1)}
+              required
+              className="input"
+            />
+          </Campo>
+
+          <Campo label="Prioridad" hint="Menor = más urgente">
+            <input
+              type="number"
+              min={1}
+              max={999}
+              value={prioridad}
+              onChange={(e) => setPrioridad(parseInt(e.target.value) || 100)}
+              className="input"
+            />
+          </Campo>
+        </div>
+
+        <Campo
+          label="Producto terminado *"
+          hint={`${productos.length} productos en catálogo`}
+        >
           <input
-            value={codigo}
-            onChange={(e) => setCodigo(e.target.value.toUpperCase())}
-            placeholder="OF-2026-007"
-            required
-            className="input"
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar por código o descripción…"
+            className="input mb-2"
           />
+          <div className="max-h-64 overflow-y-auto border border-slate-700 rounded-lg bg-slate-900">
+            {productosFiltrados.length === 0 && (
+              <div className="p-3 text-sm text-slate-500">
+                Sin resultados. Probá otra búsqueda.
+              </div>
+            )}
+            {productosFiltrados.map((p) => (
+              <button
+                key={p.codigo}
+                type="button"
+                onClick={() => setProductoCodigo(p.codigo)}
+                className={`w-full text-left p-2 border-b border-slate-800 hover:bg-slate-800 ${
+                  productoCodigo === p.codigo ? 'bg-amber-900/30 border-l-4 border-l-amber-500' : ''
+                }`}
+              >
+                <div className="font-mono text-sm text-amber-400">{p.codigo}</div>
+                <div className="text-xs text-slate-400 line-clamp-1">{p.descripcion}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  {p.tipo} · {p.potencia_kva} kVA · {p.tension_kv} kV · {p.conductor}
+                  {p.diseno_cuba && ` · ${p.diseno_cuba}`}
+                  {p.lleva_tanque_expansion && ' · con tanque'}
+                </div>
+              </button>
+            ))}
+          </div>
         </Campo>
 
-        <Campo label="Descripción">
-          <textarea
-            value={descripcion}
-            onChange={(e) => setDescripcion(e.target.value)}
-            rows={2}
-            placeholder="Ej: Transformador 500 KVA 13.2/0.4 kV"
-            className="input"
-          />
-        </Campo>
+        {productoSeleccionado && (
+          <div className="bg-slate-800 border border-slate-600 rounded-lg p-3 text-sm">
+            <div className="font-bold text-amber-400 mb-1">
+              {productoSeleccionado.codigo}
+            </div>
+            <div className="text-slate-300">{productoSeleccionado.descripcion}</div>
+            <div className="text-xs text-slate-400 mt-2">
+              Esta orden generará{' '}
+              <span className="font-bold text-emerald-400">{itemsAGenerar} items</span>{' '}
+              ({productoSeleccionado.tipo === 'trifasico' ? '9' : '6'} por unidad ×{' '}
+              {cantidad} {cantidad === 1 ? 'unidad' : 'unidades'}). Una vez creada, el
+              planificador los asigna a puestos y operarios.
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Campo label="Cliente">
@@ -203,58 +264,6 @@ export default function NuevaOrdenForm({ onCreada }: Props) {
             />
           </Campo>
         </div>
-      </div>
-
-      <div className="space-y-3">
-        <h2 className="text-touch-lg font-bold">Etapas / sectores</h2>
-        <p className="text-sm text-slate-400">
-          Elegí por qué sectores pasa esta orden. La secuencia de arriba hacia abajo
-          es el orden en que se ejecutan.
-        </p>
-
-        <ul className="space-y-2">
-          {sectores.map((s, idx) => (
-            <li
-              key={s.codigo}
-              className={`flex items-center gap-3 p-3 rounded-lg border ${
-                s.activo
-                  ? 'bg-slate-800 border-slate-600'
-                  : 'bg-slate-900 border-slate-800 opacity-60'
-              }`}
-            >
-              <label className="flex items-center gap-3 flex-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={s.activo}
-                  onChange={() => toggleSector(s.codigo)}
-                  className="w-5 h-5 accent-inelpa-accent"
-                />
-                <span className="text-touch-base font-semibold">{labelPara(s.codigo)}</span>
-                <span className="text-xs text-slate-500">({s.codigo})</span>
-              </label>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  onClick={() => mover(idx, -1)}
-                  disabled={idx === 0}
-                  className="w-10 h-10 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-30 disabled:cursor-not-allowed text-xl"
-                  title="Subir"
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => mover(idx, 1)}
-                  disabled={idx === sectores.length - 1}
-                  className="w-10 h-10 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-30 disabled:cursor-not-allowed text-xl"
-                  title="Bajar"
-                >
-                  ↓
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
       </div>
 
       {mensaje && (
@@ -279,7 +288,7 @@ export default function NuevaOrdenForm({ onCreada }: Props) {
           Limpiar
         </button>
         <button type="submit" disabled={trabajando} className="btn-primary !min-h-0 !py-3">
-          {trabajando ? 'Creando…' : 'Crear orden'}
+          {trabajando ? 'Creando…' : 'Crear orden y expandir BOM'}
         </button>
       </div>
 
